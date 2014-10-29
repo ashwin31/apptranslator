@@ -2,9 +2,6 @@
 package main
 
 import (
-	_ "fmt"
-	"launchpad.net/goamz/aws"
-	"launchpad.net/goamz/s3"
 	"log"
 	"mime"
 	"os"
@@ -13,6 +10,10 @@ import (
 	"sort"
 	"strings"
 	"time"
+
+	"github.com/crowdmob/goamz/aws"
+	"github.com/crowdmob/goamz/s3"
+	"github.com/kjk/u"
 )
 
 var backupFreq = 12 * time.Hour
@@ -41,14 +42,14 @@ func sanitizeDirForList(dir, delim string) string {
 }
 
 func listBackupFiles(config *BackupConfig, max int) (*s3.ListResp, error) {
-	auth := aws.Auth{config.AwsAccess, config.AwsSecret}
+	auth := aws.Auth{AccessKey: config.AwsAccess, SecretKey: config.AwsSecret}
 	b := s3.New(auth, aws.USEast).Bucket(config.Bucket)
 	dir := sanitizeDirForList(config.S3Dir, bucketDelim)
 	return b.List(dir, bucketDelim, "", max)
 }
 
 func s3Del(config *BackupConfig, keyName string) error {
-	auth := aws.Auth{config.AwsAccess, config.AwsSecret}
+	auth := aws.Auth{AccessKey: config.AwsAccess, SecretKey: config.AwsSecret}
 	b := s3.New(auth, aws.USEast).Bucket(config.Bucket)
 	return b.Del(keyName)
 }
@@ -64,7 +65,7 @@ func s3Put(config *BackupConfig, local, remote string, public bool) error {
 		return err
 	}
 
-	auth := aws.Auth{config.AwsAccess, config.AwsSecret}
+	auth := aws.Auth{AccessKey: config.AwsAccess, SecretKey: config.AwsSecret}
 	b := s3.New(auth, aws.USEast).Bucket(config.Bucket)
 
 	acl := s3.Private
@@ -81,13 +82,14 @@ func s3Put(config *BackupConfig, local, remote string, public bool) error {
 	if err != nil {
 		return err
 	}
-	return b.PutReader(remote, localf, localfi.Size(), contType, acl)
+	opts := s3.Options{}
+	return b.PutReader(remote, localf, localfi.Size(), contType, acl, opts)
 }
 
 // tests if s3 credentials are valid and aborts if aren't
 func ensureValidConfig(config *BackupConfig) {
-	if !PathExists(config.LocalDir) {
-		log.Fatalf("Invalid s3 backup: directory to backup '%s' doesn't exist\n", config.LocalDir)
+	if !u.PathExists(config.LocalDir) {
+		log.Fatalf("Invalid s3 backup: directory to backup %q doesn't exist\n", config.LocalDir)
 	}
 
 	if !strings.HasSuffix(config.S3Dir, bucketDelim) {
@@ -95,7 +97,7 @@ func ensureValidConfig(config *BackupConfig) {
 	}
 	_, err := listBackupFiles(config, 10)
 	if err != nil {
-		log.Fatalf("Invalid s3 backup: bucket.List failed %s\n", err.Error())
+		log.Fatalf("Invalid s3 backup: bucket.List failed %s\n", err)
 	}
 }
 
@@ -106,7 +108,7 @@ func ensureValidConfig(config *BackupConfig) {
 func alreadyUploaded(config *BackupConfig, sha1 string) bool {
 	rsp, err := listBackupFiles(config, 1024)
 	if err != nil {
-		logger.Errorf("alreadyUploaded(): listBackupFiles() failed with %s", err.Error())
+		logger.Errorf("alreadyUploaded(): listBackupFiles() failed with %q", err)
 		return false
 	}
 	for _, key := range rsp.Contents {
@@ -141,7 +143,7 @@ func isBackupFile(s string) bool {
 func deleteOldBackups(config *BackupConfig, maxToKeep int) {
 	rsp, err := listBackupFiles(config, 1024)
 	if err != nil {
-		logger.Errorf("deleteOldBackups(): listBackupFiles() failed with %s", err.Error())
+		logger.Errorf("deleteOldBackups(): listBackupFiles() failed with %s", err)
 		return
 	}
 	keys := make([]string, 0)
@@ -160,7 +162,7 @@ func deleteOldBackups(config *BackupConfig, maxToKeep int) {
 	for i := 0; i < toDelete; i++ {
 		key := keys[i]
 		if err = s3Del(config, key); err != nil {
-			logger.Noticef("deleteOldBackups(): failed to delete %s, error: %s", key, err.Error())
+			logger.Noticef("deleteOldBackups(): failed to delete %s, error: %s", key, err)
 		} else {
 			logger.Noticef("deleteOldBackups(): deleted %s", key)
 		}
@@ -172,12 +174,12 @@ func doBackup(config *BackupConfig) {
 	zipLocalPath := filepath.Join(os.TempDir(), "apptranslator-tmp-backup.zip")
 	// TODO: do I need os.Remove() won't os.Create() over-write the file anyway?
 	os.Remove(zipLocalPath) // remove before trying to create a new one, just in cased
-	err := CreateZipWithDirContent(zipLocalPath, config.LocalDir)
+	err := u.CreateZipWithDirContent(zipLocalPath, config.LocalDir)
 	defer os.Remove(zipLocalPath)
 	if err != nil {
 		return
 	}
-	sha1, err := FileSha1(zipLocalPath)
+	sha1, err := u.FileSha1(zipLocalPath)
 	if err != nil {
 		return
 	}
@@ -190,14 +192,14 @@ func doBackup(config *BackupConfig) {
 	zipS3Path := path.Join(config.S3Dir, timeStr+sha1+".zip")
 
 	if err = s3Put(config, zipLocalPath, zipS3Path, true); err != nil {
-		logger.Errorf("s3Put of '%s' to '%s' failed with %s", zipLocalPath, zipS3Path, err.Error())
+		logger.Errorf("s3Put of %q to %q failed with %s", zipLocalPath, zipS3Path, err)
 		return
 	}
 
 	deleteOldBackups(config, MaxBackupsToKeep)
 
 	dur := time.Now().Sub(startTime)
-	logger.Noticef("s3 backup of '%s' to '%s' took %.2f secs", zipLocalPath, zipS3Path, dur.Seconds())
+	logger.Noticef("s3 backup of %q to %q took %.2f secs", zipLocalPath, zipS3Path, dur.Seconds())
 }
 
 func BackupLoop(config *BackupConfig) {

@@ -1,2 +1,8 @@
-export GOPATH=`pwd`/ext:$GOPATH
-go test langs.go translog.go util.go all_test.go
+#!/bin/bash
+
+set -o nounset
+set -o errexit
+set -o pipefail
+
+cd store
+godep go test -test.v=true

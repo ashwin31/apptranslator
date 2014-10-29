@@ -2,16 +2,11 @@
 package main
 
 import (
-	"bytes"
-	"code.google.com/p/gorilla/mux"
-	"code.google.com/p/gorilla/securecookie"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
-	"github.com/garyburd/go-oauth/oauth"
-	"html/template"
 	"io/ioutil"
 	"log"
 	"net/http"
@@ -19,6 +14,11 @@ import (
 	"runtime"
 	"strings"
 	"time"
+
+	"github.com/garyburd/go-oauth/oauth"
+	"github.com/gorilla/securecookie"
+	"github.com/kjk/apptranslator/store"
+	"github.com/kjk/u"
 )
 
 var (
@@ -65,18 +65,7 @@ var (
 
 	appState = AppState{}
 
-	tmplMain      = "main.html"
-	tmplApp       = "app.html"
-	tmplAppTrans  = "apptrans.html"
-	tmplUser      = "user.html"
-	tmplLogs      = "logs.html"
-	templateNames = [...]string{
-		tmplMain, tmplApp, tmplAppTrans, tmplUser, tmplLogs, "header.html",
-		"footer.html"}
-	templatePaths   []string
-	templates       *template.Template
-	reloadTemplates = true
-	alwaysLogTime   = true
+	alwaysLogTime = true
 )
 
 func StringEmpty(s *string) bool {
@@ -107,18 +96,20 @@ func S3BackupEnabled() bool {
 	return true
 }
 
-// data dir is ../../data on the server or ../apptranslatordata locally
+// data dir is ../../data on the server or ~/data/apptranslator locally
 // the important part is that it's outside of directory with the code
 func getDataDir() string {
 	if dataDir != "" {
 		return dataDir
 	}
-	dataDir = filepath.Join("..", "apptranslatordata")
-	if PathExists(dataDir) {
+	// on the server, must be done first because ExpandTildeInPath()
+	// doesn't work when cross-compiled on mac for linux
+	dataDir = filepath.Join("..", "..", "data")
+	if u.PathExists(dataDir) {
 		return dataDir
 	}
-	dataDir = filepath.Join("..", "..", "data")
-	if PathExists(dataDir) {
+	dataDir = u.ExpandTildeInPath("~/data/apptranslator")
+	if u.PathExists(dataDir) {
 		return dataDir
 	}
 	log.Fatal("data directory (../../data or ../apptranslatordata) doesn't exist")
@@ -133,7 +124,8 @@ type AppConfig struct {
 	DataDir string
 	// we authenticate only with Twitter, this is the twitter user name
 	// of the admin user
-	AdminTwitterUser string
+	AdminTwitterUser  string
+	AdminTwitterUser2 string
 	// an arbitrary string, used to protect the API for uploading new strings
 	// for the app
 	UploadSecret string
@@ -145,7 +137,7 @@ type User struct {
 
 type App struct {
 	AppConfig
-	translationLog *TranslationLog
+	store *store.StoreCsv
 }
 
 type AppState struct {
@@ -160,53 +152,59 @@ func NewApp(config *AppConfig) *App {
 
 // used in templates
 func (a *App) LangsCount() int {
-	return len(Languages)
-	//return a.translationLog.LangsCount()
+	return len(store.Languages)
+	//return a.store.LangsCount()
 }
 
 // used in templates
 func (a *App) StringsCount() int {
-	return a.translationLog.StringsCount()
+	return a.store.StringsCount()
 }
 
 // used in templates
 func (a *App) UntranslatedCount() int {
-	return a.translationLog.UntranslatedCount()
+	return a.store.UntranslatedCount()
 }
 
-func (a *App) translationLogFilePath() string {
+func (a *App) EditsCount() int {
+	return a.store.EditsCount()
+}
+
+func (a *App) storeBinaryFilePath() string {
 	// the data directory and file 'translations.dat' must already
 	// exists. We don't expect adding new projects often, it requires a
 	// deploy anyway, so we force the admin to create those dirs
 	appDataDir := filepath.Join(getDataDir(), a.DataDir)
 	dataFilePath := filepath.Join(appDataDir, "translations.dat")
-	if !PathExists(dataFilePath) {
+	/*if !u.PathExists(dataFilePath) {
 		log.Fatalf("Data file %s for app %s doesn't exist. Prease create (empty file is ok)!\n", dataFilePath, a.Name)
-	}
+	}*/
+	return dataFilePath
+}
+
+func (a *App) storeCsvFilePath() string {
+	// the data directory and file 'translations.dat' must already
+	// exists. We don't expect adding new projects often, it requires a
+	// deploy anyway, so we force the admin to create those dirs
+	appDataDir := filepath.Join(getDataDir(), a.DataDir)
+	dataFilePath := filepath.Join(appDataDir, "translations.csv")
+	/*if !u.PathExists(dataFilePath) {
+		log.Fatalf("Data file %s for app %s doesn't exist. Prease create (empty file is ok)!\n", dataFilePath, a.Name)
+	}*/
 	return dataFilePath
 }
 
 func readAppData(app *App) error {
-	l, err := NewTranslationLog(app.translationLogFilePath())
-	if err != nil {
-		return err
+	var path string
+	path = app.storeCsvFilePath()
+	if u.PathExists(path) {
+		if l, err := store.NewStoreCsv(path); err == nil {
+			app.store = l
+			return nil
+		}
 	}
-	app.translationLog = l
-	return nil
+	return fmt.Errorf("readAppData: %q data file doesn't exist", path)
 }
-
-/*
-type StringsSeq []string
-
-func (s StringsSeq) Len() int      { return len(s) }
-func (s StringsSeq) Swap(i, j int) { s[i], s[j] = s[j], s[i] }
-
-type SmartString struct{ StringsSeq }
-
-func (s SmartString) Less(i, j int) bool {
-	return transStringLess(s.StringsSeq[i], s.StringsSeq[j])
-}
-*/
 
 func findApp(name string) *App {
 	for _, app := range appState.Apps {
@@ -240,7 +238,7 @@ func appInvalidField(app *App) string {
 
 func addApp(app *App) error {
 	if invalidField := appInvalidField(app); invalidField != "" {
-		return errors.New(fmt.Sprintf("App has invalid field '%s'", invalidField))
+		return fmt.Errorf("App has invalid field %q", invalidField)
 	}
 	if appAlreadyExists(app.Name) {
 		return errors.New("App already exists")
@@ -252,45 +250,15 @@ func addApp(app *App) error {
 	return nil
 }
 
-func GetTemplates() *template.Template {
-	if reloadTemplates || (nil == templates) {
-		if 0 == len(templatePaths) {
-			for _, name := range templateNames {
-				templatePaths = append(templatePaths, filepath.Join("tmpl", name))
-			}
-		}
-		templates = template.Must(template.ParseFiles(templatePaths...))
-	}
-	return templates
-}
-
-func ExecTemplate(w http.ResponseWriter, templateName string, model interface{}) bool {
-	var buf bytes.Buffer
-	if err := GetTemplates().ExecuteTemplate(&buf, templateName, model); err != nil {
-		logger.Errorf("Failed to execute template '%s', error: %s", templateName, err.Error())
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return false
-	} else {
-		// at this point we ignore error
-		w.Write(buf.Bytes())
-	}
-	return true
-}
-
 func isTopLevelUrl(url string) bool {
 	return 0 == len(url) || "/" == url
 }
 
-func serve404(w http.ResponseWriter, r *http.Request) {
-	http.NotFound(w, r)
-}
-
-func serveErrorMsg(w http.ResponseWriter, msg string) {
-	http.Error(w, msg, http.StatusBadRequest)
-}
-
 func userIsAdmin(app *App, user string) bool {
-	return user == app.AdminTwitterUser
+	if user == "" {
+		return false
+	}
+	return user == app.AdminTwitterUser || user == app.AdminTwitterUser2
 }
 
 // reads the configuration file from the path specified by
@@ -348,7 +316,7 @@ func makeTimingHandler(fn func(http.ResponseWriter, *http.Request)) http.Handler
 			if len(r.URL.RawQuery) > 0 {
 				url = fmt.Sprintf("%s?%s", url, r.URL.RawQuery)
 			}
-			logger.Noticef("'%s' took %f seconds to serve\n", url, duration.Seconds())
+			logger.Noticef("%q took %f seconds to serve", url, duration.Seconds())
 		}
 	}
 }
@@ -376,20 +344,20 @@ func main() {
 		} else {
 			loggerFile, err := os.OpenFile(*logPath, os.O_CREATE|os.O_APPEND|os.O_RDWR, 0666)
 			if err != nil {
-				log.Fatalf("Failed to open log file '%s', %s\n", *logPath, err.Error())
+				log.Fatalf("Failed to open log file %q, %s\n", *logPath, err)
 			}
 			defer loggerFile.Close()
 			logger = log.New(loggerFile, "", 0)
 		}*/
 
 	if err := readConfig(*configPath); err != nil {
-		log.Fatalf("Failed reading config file %s. %s\n", *configPath, err.Error())
+		log.Fatalf("Failed reading config file %s. %s\n", *configPath, err)
 	}
 
 	for _, appData := range config.Apps {
 		app := NewApp(&appData)
 		if err := addApp(app); err != nil {
-			log.Fatalf("Failed to add the app: %s, err: %s\n", app.Name, err.Error())
+			log.Fatalf("Failed to add the app: %s, err: %s\n", app.Name, err)
 		}
 	}
 
@@ -397,24 +365,6 @@ func main() {
 	if len(appState.Apps) == 0 {
 		log.Fatalf("No apps defined in config.json")
 	}
-
-	r := mux.NewRouter()
-	r.HandleFunc("/app/{appname}", makeTimingHandler(handleApp))
-	r.HandleFunc("/app/{appname}/{lang}", makeTimingHandler(handleAppTranslations))
-	r.HandleFunc("/user/{user}", makeTimingHandler(handleUser))
-	r.HandleFunc("/edittranslation", makeTimingHandler(handleEditTranslation))
-	r.HandleFunc("/dltrans", makeTimingHandler(handleDownloadTranslations))
-	r.HandleFunc("/uploadstrings", makeTimingHandler(handleUploadStrings))
-	r.HandleFunc("/rss", makeTimingHandler(handleRss))
-
-	r.HandleFunc("/login", handleLogin)
-	r.HandleFunc("/oauthtwittercb", handleOauthTwitterCallback)
-	r.HandleFunc("/logout", handleLogout)
-	r.HandleFunc("/logs", makeTimingHandler(handleLogs))
-	r.HandleFunc("/", makeTimingHandler(handleMain))
-
-	http.HandleFunc("/s/", makeTimingHandler(handleStatic))
-	http.Handle("/", r)
 
 	backupConfig := &BackupConfig{
 		AwsAccess: *config.AwsAccess,
@@ -428,9 +378,10 @@ func main() {
 		go BackupLoop(backupConfig)
 	}
 
+	InitHttpHandlers()
 	logger.Noticef(fmt.Sprintf("Started running on %s", *httpAddr))
 	if err := http.ListenAndServe(*httpAddr, nil); err != nil {
-		fmt.Printf("http.ListendAndServer() failed with %s\n", err.Error())
+		fmt.Printf("http.ListendAndServer() failed with %q\n", err)
 	}
 	fmt.Printf("Exited\n")
 }

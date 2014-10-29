@@ -1,8 +1,7 @@
 .DS_Store
-ext/pkg/
+apptranslator_app_linux
 apptranslator_app
 config.json
-SumatraPDF_trans.dat
 transtest.dat
 *.pyc
 *.zip

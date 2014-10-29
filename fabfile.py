@@ -4,6 +4,7 @@ import zipfile
 from fabric.api import *
 from fabric.contrib import *
 
+
 # TODO: could also automate the following:
 # - if /etc/nginx/sites-available/apptranslator doesn't exist,
 #   copy scripts/nginx.conf as /etc/nginx/sites-available/apptranslator and
@@ -14,10 +15,8 @@ from fabric.contrib import *
 # - mkdir /home/apptranslator/www; mkdir /home/apptranslator/www/app; mkdir /home/apptranslator/www/data
 #   if they don't already exist
 
-# TODO: temporarily using do.apptranslator.org, change back to apptranslator.org
-env.hosts = ['do.apptranslator.org']
+env.hosts = ['apptranslator.org']
 env.user = 'apptranslator'
-
 app_dir = 'www/app'
 
 
@@ -61,12 +60,9 @@ def add_dir_files(zip_file, dir):
 
 def zip_files(zip_path):
 	zf = zipfile.ZipFile(zip_path, mode="w", compression=zipfile.ZIP_DEFLATED)
-	blacklist = ["importsumtrans.go"]
-	files = [f for f in os.listdir(".") if f.endswith(".go") and not f in blacklist]
-	for f in files: zf.write(f)
 	zf.write("config.json")
+	zf.write("apptranslator_app_linux", "apptranslator_app")
 	add_dir_files(zf, "scripts")
-	add_dir_files(zf, "ext")
 	add_dir_files(zf, "tmpl")
 	add_dir_files(zf, "static")
 	zf.close()
@@ -86,7 +82,7 @@ def delete_old_deploys(to_keep=5):
 				i += 1
 				to_keep -= 1
 			else:
-				if len(s) == 41: # s == "0111cb7bdd014850e8c11ee4820dc0d7e12f4015/"
+				if len(s) == 41:  # s == "0111cb7bdd014850e8c11ee4820dc0d7e12f4015/"
 					dirs_to_del.append(s)
 			i += 1
 		if len(dirs_to_del) > to_keep:
@@ -95,9 +91,11 @@ def delete_old_deploys(to_keep=5):
 			for d in dirs_to_del:
 				run("rm -rf %s" % d)
 
+
 def check_config():
 	if not os.path.exists("config.json"):
 		abort("config.json doesn't exist locally")
+
 
 def deploy():
 	check_config()
@@ -119,9 +117,6 @@ def deploy():
 	with cd(app_dir):
 		run('unzip -q -x %s -d %s' % (zip_path, sha1))
 		run('rm -f %s' % zip_path)
-	# make sure it can build
-	with cd(code_path_remote):
-		run("./scripts/build.sh")
 
 	curr_dir = app_dir + '/current'
 	if files.exists(curr_dir):

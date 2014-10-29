@@ -1,5 +1,9 @@
-go fmt
-cd tools/importsumatra
-go fmt
-cd ../listbackup
-go fmt
+#!/bin/bash
+
+set -o nounset
+set -o errexit
+set -o pipefail
+
+go fmt *.go
+go fmt tools/listbackup/*.go
+
